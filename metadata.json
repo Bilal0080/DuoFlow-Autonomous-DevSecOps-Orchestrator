@@ -1,0 +1,8 @@
+{
+  "name": "DuoFlow: Autonomous DevSecOps Orchestrator",
+  "description": "A high-performance dashboard that leverages specialized Gemini agents to automate security fixes, streamline code reviews, and ensure compliance in real-time. Experience the future of GitLab Duo-inspired workflows where agents don't just chat—they act.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
