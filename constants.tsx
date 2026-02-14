@@ -63,9 +63,9 @@ export const AGENTS: Agent[] = [
     id: 'code-refactorer',
     name: 'CodeRefactorer',
     role: 'REFACTOR',
-    description: 'Architectural modernization specialist. Orchestrates large-scale transformations like migrating from CommonJS to ES Modules or upgrading deprecated third-party SDK versions.',
+    description: 'Architectural modernization specialist. Orchestrates large-scale transformations like migrating from CommonJS to ES Modules. Invoked once code is pre-validated for refactoring.',
     icon: '✨',
-    subscriptions: [TriggerType.VULNERABILITY_DETECTED, TriggerType.INEFFICIENCY_DETECTED, TriggerType.SCHEMA_MISMATCH]
+    subscriptions: [TriggerType.REFACTOR_READY]
   },
   {
     id: 'cicd-integrator',

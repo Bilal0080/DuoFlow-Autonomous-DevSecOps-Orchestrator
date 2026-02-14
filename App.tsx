@@ -9,6 +9,7 @@ import WorkflowTimeline from './components/WorkflowTimeline';
 import TriggerBus from './components/TriggerBus';
 
 type TimeRange = 'LIVE' | '1H' | '24H' | '7D';
+const TIMEOUT_THRESHOLD = 5 * 60 * 1000; // 5 minutes
 
 const App: React.FC = () => {
   const [code, setCode] = useState(INITIAL_CODE_SAMPLE);
@@ -20,21 +21,49 @@ const App: React.FC = () => {
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [triggerQueue, setTriggerQueue] = useState<TriggerEvent[]>([]);
   const [processedTriggers, setProcessedTriggers] = useState<Set<string>>(new Set());
+  
+  // Filtering States
   const [selectedRole, setSelectedRole] = useState<AgentRole | 'ALL'>('ALL');
+  const [selectedStatus, setSelectedStatus] = useState<AgentStatus | 'ALL'>('ALL');
   const [selectedRange, setSelectedRange] = useState<TimeRange>('LIVE');
   
+  // Track last activity for each agent
+  const [agentActivity, setAgentActivity] = useState<Record<string, number>>(
+    AGENTS.reduce((acc, agent) => ({ ...acc, [agent.id]: Date.now() }), {})
+  );
+
   const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentStatus>>(
     AGENTS.reduce((acc, agent) => ({ ...acc, [agent.id]: AgentStatus.IDLE }), {})
   );
+
+  // Poll for unresponsive agents
+  const [unresponsiveAgents, setUnresponsiveAgents] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    const poller = setInterval(() => {
+      const now = Date.now();
+      const newUnresponsive = new Set<string>();
+      
+      AGENTS.forEach(agent => {
+        const lastActive = agentActivity[agent.id] || 0;
+        if (agentStatuses[agent.id] === AgentStatus.IDLE && (now - lastActive) > TIMEOUT_THRESHOLD) {
+          newUnresponsive.add(agent.id);
+        }
+      });
+      
+      setUnresponsiveAgents(newUnresponsive);
+    }, 10000);
+
+    return () => clearInterval(poller);
+  }, [agentActivity, agentStatuses]);
 
   // Initialize with some mock historical data
   useEffect(() => {
     const now = Date.now();
     const mockData: RiskDataPoint[] = [];
-    // Generate data for the last 7 days
     for (let i = 100; i >= 0; i--) {
       mockData.push({
-        timestamp: now - (i * 1000 * 60 * 60 * 2), // every 2 hours
+        timestamp: now - (i * 1000 * 60 * 60 * 2),
         score: Math.floor(Math.random() * 40) + 10
       });
     }
@@ -67,9 +96,11 @@ const App: React.FC = () => {
 
   const updateAgentStatus = (agentId: string, status: AgentStatus) => {
     setAgentStatuses(prev => ({ ...prev, [agentId]: status }));
+    if (status !== AgentStatus.IDLE) {
+      setAgentActivity(prev => ({ ...prev, [agentId]: Date.now() }));
+    }
   };
 
-  // Agent counts by role
   const roleCounts = useMemo(() => {
     const counts: Record<string, number> = { ALL: AGENTS.length };
     AGENTS.forEach(agent => {
@@ -78,12 +109,22 @@ const App: React.FC = () => {
     return counts;
   }, []);
 
-  const filteredAgents = useMemo(() => {
-    if (selectedRole === 'ALL') return AGENTS;
-    return AGENTS.filter(agent => agent.role === selectedRole);
-  }, [selectedRole]);
+  const statusCounts = useMemo(() => {
+    const counts: Record<string, number> = { ALL: AGENTS.length };
+    Object.values(agentStatuses).forEach(status => {
+      counts[status] = (counts[status] || 0) + 1;
+    });
+    return counts;
+  }, [agentStatuses]);
 
-  // Filter risk history based on selected range
+  const filteredAgents = useMemo(() => {
+    return AGENTS.filter(agent => {
+      const roleMatch = selectedRole === 'ALL' || agent.role === selectedRole;
+      const statusMatch = selectedStatus === 'ALL' || agentStatuses[agent.id] === selectedStatus;
+      return roleMatch && statusMatch;
+    });
+  }, [selectedRole, selectedStatus, agentStatuses]);
+
   const filteredRiskData = useMemo(() => {
     const now = Date.now();
     let cutOff = 0;
@@ -94,7 +135,6 @@ const App: React.FC = () => {
       case '7D': cutOff = now - 7 * 24 * 60 * 60 * 1000; break;
       case 'LIVE':
       default:
-        // For LIVE, we just show the last 15 entries
         return riskHistory.slice(-15).map(d => ({
           ...d,
           displayTime: new Date(d.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -109,7 +149,6 @@ const App: React.FC = () => {
       }));
   }, [riskHistory, selectedRange]);
 
-  // The Autonomous Orchestration Engine
   useEffect(() => {
     if (triggerQueue.length === 0) return;
 
@@ -143,6 +182,7 @@ const App: React.FC = () => {
           updateAgentStatus(agent.id, AgentStatus.COMPLETED);
           addEvent(agent.name, `Task complete. Found ${structured.length} actionable items.`);
 
+          // Orchestration logic based on agent identity and role
           if (agent.role === 'SECURITY' && structured.some(f => f.severity === 'high' || f.severity === 'medium')) {
             emitTrigger(TriggerType.VULNERABILITY_DETECTED, agent.name);
           } else if (agent.role === 'PERFORMANCE' && structured.length > 0) {
@@ -150,7 +190,13 @@ const App: React.FC = () => {
           } else if (agent.name === 'SchemaGuardian' && structured.length > 0) {
             emitTrigger(TriggerType.SCHEMA_MISMATCH, agent.name);
           } else if (agent.role === 'REFACTOR') {
-            emitTrigger(TriggerType.REFACTOR_COMPLETE, agent.name);
+            if (agent.id === 'refactor-engine') {
+              // AutoRefactor signals that specialized refactoring is now possible
+              emitTrigger(TriggerType.REFACTOR_READY, agent.name);
+            } else {
+              // CodeRefactorer or other specialists complete the final stage
+              emitTrigger(TriggerType.REFACTOR_COMPLETE, agent.name);
+            }
           } else if (agent.role === 'INTEGRATION') {
             if (structured.some(f => f.severity === 'high')) {
               emitTrigger(TriggerType.BUILD_FAILED, agent.name);
@@ -180,9 +226,8 @@ const App: React.FC = () => {
     setFindings([]);
     setProcessedTriggers(new Set());
     setAgentStatuses(AGENTS.reduce((acc, agent) => ({ ...acc, [agent.id]: AgentStatus.IDLE }), {}));
-    
+    setAgentActivity(AGENTS.reduce((acc, agent) => ({ ...acc, [agent.id]: Date.now() }), {}));
     emitTrigger(TriggerType.CODE_SUBMITTED, 'DEV_COMMIT_WEBHOOK');
-    
     setTimeout(() => setIsProcessing(false), 2000);
   };
 
@@ -230,7 +275,6 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Confirmation Modal */}
       {showConfirmModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
           <div className="bg-[#161b22] border border-slate-700 max-w-md w-full rounded-2xl p-8 shadow-2xl relative overflow-hidden">
@@ -311,44 +355,103 @@ const App: React.FC = () => {
             </section>
 
             <section>
-              <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
-                <h2 className="text-lg font-bold flex items-center gap-2">
-                  <span className="text-purple-500">#</span> Specialized Agents
-                </h2>
-                <div className="flex flex-wrap gap-2">
-                  {['ALL', 'SECURITY', 'REVIEWER', 'PERFORMANCE', 'COMPLIANCE', 'REFACTOR', 'INTEGRATION'].map((role) => (
-                    <button
-                      key={role}
-                      onClick={() => setSelectedRole(role as any)}
-                      className={`
-                        flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border
-                        ${selectedRole === role 
-                          ? 'bg-blue-600/20 border-blue-500/50 text-blue-300 shadow-[0_0_15px_rgba(59,130,246,0.2)]' 
-                          : 'bg-slate-900/40 border-slate-800 text-slate-500 hover:border-slate-700 hover:text-slate-400'
-                        }
-                      `}
-                    >
-                      {role === 'ALL' ? 'All Units' : role}
-                      <span className={`
-                        px-1.5 py-0.5 rounded-md text-[10px] leading-none
-                        ${selectedRole === role ? 'bg-blue-500 text-white' : 'bg-slate-800 text-slate-500'}
-                      `}>
-                        {roleCounts[role] || 0}
-                      </span>
-                    </button>
-                  ))}
+              <div className="space-y-6 mb-6">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <h2 className="text-lg font-bold flex items-center gap-2">
+                    <span className="text-purple-500">#</span> Specialized Agents
+                  </h2>
+                </div>
+                
+                <div className="space-y-4 bg-slate-900/40 p-4 rounded-xl border border-slate-800/50">
+                  {/* Role Filters */}
+                  <div className="flex flex-col gap-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest px-1">Filter by Mission</label>
+                    <div className="flex flex-wrap gap-2">
+                      {['ALL', 'SECURITY', 'REVIEWER', 'PERFORMANCE', 'COMPLIANCE', 'REFACTOR', 'INTEGRATION'].map((role) => (
+                        <button
+                          key={role}
+                          onClick={() => setSelectedRole(role as any)}
+                          className={`
+                            flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border
+                            ${selectedRole === role 
+                              ? 'bg-blue-600/20 border-blue-500/50 text-blue-300 shadow-[0_0_15px_rgba(59,130,246,0.1)]' 
+                              : 'bg-slate-900/40 border-slate-800 text-slate-500 hover:border-slate-700 hover:text-slate-400'
+                            }
+                          `}
+                        >
+                          {role === 'ALL' ? 'All Roles' : role}
+                          <span className={`
+                            px-1.5 py-0.5 rounded-md text-[9px] leading-none
+                            ${selectedRole === role ? 'bg-blue-500 text-white' : 'bg-slate-800 text-slate-500'}
+                          `}>
+                            {roleCounts[role] || 0}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Status Filters */}
+                  <div className="flex flex-col gap-2 pt-2 border-t border-slate-800/30">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest px-1">Filter by Operational Status</label>
+                    <div className="flex flex-wrap gap-2">
+                      {['ALL', ...Object.values(AgentStatus)].map((status) => (
+                        <button
+                          key={status}
+                          onClick={() => setSelectedStatus(status as any)}
+                          className={`
+                            flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border
+                            ${selectedStatus === status 
+                              ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-300 shadow-[0_0_15px_rgba(99,102,241,0.1)]' 
+                              : 'bg-slate-900/40 border-slate-800 text-slate-500 hover:border-slate-700 hover:text-slate-400'
+                            }
+                          `}
+                        >
+                          <div className={`w-1.5 h-1.5 rounded-full ${
+                            status === 'ALL' ? 'bg-slate-400' :
+                            status === AgentStatus.IDLE ? 'bg-slate-600' :
+                            status === AgentStatus.THINKING ? 'bg-blue-400' :
+                            status === AgentStatus.ACTING ? 'bg-purple-400' :
+                            status === AgentStatus.COMPLETED ? 'bg-emerald-400' :
+                            'bg-red-400'
+                          }`} />
+                          {status === 'ALL' ? 'Any Status' : status}
+                          <span className={`
+                            px-1.5 py-0.5 rounded-md text-[9px] leading-none
+                            ${selectedStatus === status ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-500'}
+                          `}>
+                            {statusCounts[status] || 0}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {filteredAgents.map(agent => (
-                  <AgentCard 
-                    key={agent.id} 
-                    agent={agent} 
-                    status={agentStatuses[agent.id]} 
-                  />
-                ))}
-              </div>
+              {filteredAgents.length > 0 ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {filteredAgents.map(agent => (
+                    <AgentCard 
+                      key={agent.id} 
+                      agent={agent} 
+                      status={agentStatuses[agent.id]} 
+                      isUnresponsive={unresponsiveAgents.has(agent.id)}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-20 bg-slate-900/20 border border-dashed border-slate-800 rounded-2xl">
+                  <div className="text-3xl mb-4 opacity-20">📡</div>
+                  <p className="text-slate-500 text-sm font-medium italic">No agents match the selected criteria.</p>
+                  <button 
+                    onClick={() => { setSelectedRole('ALL'); setSelectedStatus('ALL'); }}
+                    className="mt-4 text-xs font-bold text-blue-500 hover:underline"
+                  >
+                    Reset filters
+                  </button>
+                </div>
+              )}
             </section>
 
             {findings.length > 0 && (
